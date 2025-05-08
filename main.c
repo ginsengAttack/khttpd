@@ -166,6 +166,7 @@ static int __init khttpd_init(void)
         close_listen_socket(listen_socket);
         return PTR_ERR(http_server);
     }
+
     return 0;
 }
 
@@ -184,3 +185,4 @@ MODULE_LICENSE("Dual MIT/GPL");
 MODULE_AUTHOR("National Cheng Kung University, Taiwan");
 MODULE_DESCRIPTION("in-kernel HTTP daemon");
 MODULE_VERSION("0.1");
+

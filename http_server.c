@@ -39,6 +39,11 @@ struct http_request {
     int complete;
 };
 
+static struct link_data {
+    struct socket *socket;
+    struct work_struct worker;
+};
+
 static int http_server_recv(struct socket *sock, char *buf, size_t size)
 {
     struct kvec iov = {.iov_base = (void *) buf, .iov_len = size};
@@ -145,8 +150,12 @@ static int http_parser_callback_message_complete(http_parser *parser)
     return 0;
 }
 
-static int http_server_worker(void *arg)
+struct workqueue_struct *cmwq_workqueue;
+
+static void http_server_worker(struct work_struct *w)
 {
+    struct link_data *data_for_link = container_of(w, struct link_data, worker);
+
     char *buf;
     struct http_parser parser;
     struct http_parser_settings setting = {
@@ -159,7 +168,8 @@ static int http_server_worker(void *arg)
         .on_message_complete = http_parser_callback_message_complete,
     };
     struct http_request request;
-    struct socket *socket = (struct socket *) arg;
+    // struct socket *socket = (struct socket *) arg;
+    struct socket *socket = data_for_link->socket;
 
     allow_signal(SIGKILL);
     allow_signal(SIGTERM);
@@ -167,7 +177,7 @@ static int http_server_worker(void *arg)
     buf = kzalloc(RECV_BUFFER_SIZE, GFP_KERNEL);
     if (!buf) {
         pr_err("can't allocate memory!\n");
-        return -1;
+        return;
     }
 
     request.socket = socket;
@@ -188,7 +198,7 @@ static int http_server_worker(void *arg)
     kernel_sock_shutdown(socket, SHUT_RDWR);
     sock_release(socket);
     kfree(buf);
-    return 0;
+    return;
 }
 
 int http_server_daemon(void *arg)
@@ -200,6 +210,8 @@ int http_server_daemon(void *arg)
     allow_signal(SIGKILL);
     allow_signal(SIGTERM);
 
+    cmwq_workqueue = alloc_workqueue("Ktcp", 0, 0);
+
     while (!kthread_should_stop()) {
         int err = kernel_accept(param->listen_socket, &socket, 0);
         if (err < 0) {
@@ -208,11 +220,20 @@ int http_server_daemon(void *arg)
             pr_err("kernel_accept() error: %d\n", err);
             continue;
         }
-        worker = kthread_run(http_server_worker, socket, KBUILD_MODNAME);
-        if (IS_ERR(worker)) {
-            pr_err("can't create more worker process\n");
-            continue;
-        }
+
+        struct link_data *worker;
+
+        if (!(worker = kmalloc(sizeof(struct link_data), GFP_KERNEL)))
+            return NULL;
+
+        worker->socket = socket;
+        INIT_WORK(&worker->worker, http_server_worker);
+        queue_work(cmwq_workqueue, &worker->worker);
     }
+
+    flush_workqueue(cmwq_workqueue);
+    destroy_workqueue(cmwq_workqueue);
+
     return 0;
 }
+
