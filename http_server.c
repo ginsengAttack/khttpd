@@ -9,16 +9,18 @@
 
 #define CRLF "\r\n"
 
+#define PATH "/home/ginseng/ktcp/root"
+
 #define HTTP_RESPONSE_200_DUMMY                               \
     ""                                                        \
     "HTTP/1.1 200 OK" CRLF "Server: " KBUILD_MODNAME CRLF     \
     "Content-Type: text/plain" CRLF "Content-Length: 12" CRLF \
-    "Connection: Close" CRLF CRLF "Hello World!" CRLF
+    "Connection: Close" CRLF CRLF "NMSL!!!!!!!!" CRLF
 #define HTTP_RESPONSE_200_KEEPALIVE_DUMMY                     \
     ""                                                        \
     "HTTP/1.1 200 OK" CRLF "Server: " KBUILD_MODNAME CRLF     \
     "Content-Type: text/plain" CRLF "Content-Length: 12" CRLF \
-    "Connection: Keep-Alive" CRLF CRLF "Hello World!" CRLF
+    "Connection: Keep-Alive" CRLF CRLF "NMSL?!!!!!!!" CRLF
 #define HTTP_RESPONSE_501                                              \
     ""                                                                 \
     "HTTP/1.1 501 Not Implemented" CRLF "Server: " KBUILD_MODNAME CRLF \
@@ -31,12 +33,14 @@
     "Connection: KeepAlive" CRLF CRLF "501 Not Implemented" CRLF
 
 #define RECV_BUFFER_SIZE 4096
+#define SEND_BUFFER_SIZE 4096
 
 struct http_request {
     struct socket *socket;
     enum http_method method;
     char request_url[128];
     int complete;
+    struct dir_context dir_context;
 };
 
 static struct link_data {
@@ -72,7 +76,9 @@ static int http_server_send(struct socket *sock, const char *buf, size_t size)
             .iov_base = (void *) ((char *) buf + done),
             .iov_len = size - done,
         };
+
         int length = kernel_sendmsg(sock, &msg, &iov, 1, iov.iov_len);
+
         if (length < 0) {
             pr_err("write error: %d\n", length);
             break;
@@ -82,17 +88,94 @@ static int http_server_send(struct socket *sock, const char *buf, size_t size)
     return done;
 }
 
+static void catstr(char *res, char *first, char *second)
+{
+    int first_size = strlen(first);
+    int second_size = strlen(second);
+    memset(res, 0, 1024);
+    memcpy(res, first, first_size);
+    memcpy(res + first_size, second, second_size);
+}
+
+/*callback function to handle every entry in directory*/
+static _Bool tracedir(struct dir_context *dir_context,
+                      const char *name,
+                      int namelen,
+                      loff_t offset,
+                      u64 ino,
+                      unsigned int d_type)
+{
+    if (strcmp(name, ".") && strcmp(name, "..")) {
+        struct http_request *request =
+            container_of(dir_context, struct http_request, dir_context);
+        char buf[SEND_BUFFER_SIZE] = {0};
+
+        snprintf(buf, SEND_BUFFER_SIZE,
+                 "<tr><td><a href=\"%s\">%s</a></td></tr>\r\n", name, name);
+        http_server_send(request->socket, buf, strlen(buf));
+    }
+    return true;
+}
+
+static bool send_directory(struct http_request *request, int keep_alive)
+{
+    char path[1024] = {0};
+    const char *root = PATH;
+    catstr(path, root, request->request_url);
+    pr_info("the url is:%s", path);
+
+    struct file *fp = filp_open(path, O_RDONLY, 0);
+    if (IS_ERR(fp)) {
+        return false;
+    }
+
+    char response[SEND_BUFFER_SIZE] = {0};
+    if (S_ISDIR(fp->f_inode->i_mode)) {
+        snprintf(response, SEND_BUFFER_SIZE,
+                 ""
+                 "HTTP/1.1 200 OK" CRLF "Server: " KBUILD_MODNAME CRLF
+                 "Content-Type: text/html" CRLF
+                 "Connection: Keep-Alive" CRLF CRLF);
+        http_server_send(request->socket, response, strlen(response));
+
+        snprintf(
+            response, SEND_BUFFER_SIZE, "%s%s%s%s", "<html><head><style>\r\n",
+            "body{font-family: monospace; font-size: 15px;}\r\n",
+            "td {padding: 1.5px 6px;}\r\n", "</style></head><body><table>\r\n");
+        http_server_send(request->socket, response, strlen(response));
+
+        request->dir_context.actor = tracedir;
+        iterate_dir(fp, &request->dir_context);
+
+        snprintf(response, SEND_BUFFER_SIZE, "%s",
+                 "</table></body></html>\r\n");
+        http_server_send(request->socket, response, strlen(response));
+    } else if (S_ISREG(fp->f_inode->i_mode)) {
+        char *html_data = kmalloc(fp->f_inode->i_size, GFP_KERNEL);
+        int html_length = kernel_read(fp, html_data, fp->f_inode->i_size, 0);
+
+        snprintf(response, SEND_BUFFER_SIZE,
+                 ""
+                 "HTTP/1.1 200 OK" CRLF "Server: " KBUILD_MODNAME CRLF
+                 "Content-Type: text/html" CRLF "Content-Length:%d" CRLF
+                 "Connection: Keep-Alive" CRLF CRLF,
+                 html_length);
+        http_server_send(request->socket, response, strlen(response));
+
+        http_server_send(request->socket, html_data, html_length);
+        kfree(html_data);
+    }
+
+    filp_close(fp, NULL);
+    return true;
+}
+
 static int http_server_response(struct http_request *request, int keep_alive)
 {
-    char *response;
-
     pr_info("requested_url = %s\n", request->request_url);
-    if (request->method != HTTP_GET)
-        response = keep_alive ? HTTP_RESPONSE_501_KEEPALIVE : HTTP_RESPONSE_501;
-    else
-        response = keep_alive ? HTTP_RESPONSE_200_KEEPALIVE_DUMMY
-                              : HTTP_RESPONSE_200_DUMMY;
-    http_server_send(request->socket, response, strlen(response));
+    send_directory(request, keep_alive);
+    kernel_sock_shutdown(request->socket, SHUT_RDWR);
+
     return 0;
 }
 
@@ -195,7 +278,7 @@ static void http_server_worker(struct work_struct *w)
             break;
         memset(buf, 0, RECV_BUFFER_SIZE);
     }
-    kernel_sock_shutdown(socket, SHUT_RDWR);
+    // kernel_sock_shutdown(socket, SHUT_RDWR);
     sock_release(socket);
     kfree(buf);
     return;
@@ -236,4 +319,3 @@ int http_server_daemon(void *arg)
 
     return 0;
 }
-
