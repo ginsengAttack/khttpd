@@ -110,8 +110,14 @@ static _Bool tracedir(struct dir_context *dir_context,
             container_of(dir_context, struct http_request, dir_context);
         char buf[SEND_BUFFER_SIZE] = {0};
 
+
+
         snprintf(buf, SEND_BUFFER_SIZE,
-                 "<tr><td><a href=\"%s\">%s</a></td></tr>\r\n", name, name);
+                 "%lx\r\n<tr><td><a href=\"%s/%s\">%s</a></td></tr>\r\n",
+                 34 + namelen + namelen + strlen(request->request_url),
+                 request->request_url, name, name);
+
+        pr_info("send url:%s", buf);
         http_server_send(request->socket, buf, strlen(buf));
     }
     return true;
@@ -122,7 +128,6 @@ static bool send_directory(struct http_request *request, int keep_alive)
     char path[1024] = {0};
     const char *root = PATH;
     catstr(path, root, request->request_url);
-    pr_info("the url is:%s", path);
 
     struct file *fp = filp_open(path, O_RDONLY, 0);
     if (IS_ERR(fp)) {
@@ -135,20 +140,25 @@ static bool send_directory(struct http_request *request, int keep_alive)
                  ""
                  "HTTP/1.1 200 OK" CRLF "Server: " KBUILD_MODNAME CRLF
                  "Content-Type: text/html" CRLF
+                 "Transfer-Encoding: chunked" CRLF
                  "Connection: Keep-Alive" CRLF CRLF);
         http_server_send(request->socket, response, strlen(response));
 
-        snprintf(
-            response, SEND_BUFFER_SIZE, "%s%s%s%s", "<html><head><style>\r\n",
-            "body{font-family: monospace; font-size: 15px;}\r\n",
-            "td {padding: 1.5px 6px;}\r\n", "</style></head><body><table>\r\n");
+        snprintf(response, SEND_BUFFER_SIZE, "7B\r\n%s%s%s%s",
+                 "<html><head><style>\r\n",
+                 "body{font-family: monospace; font-size: 15px;}\r\n",
+                 "td {padding: 1.5px 6px;}\r\n",
+                 "</style></head><body><table>\r\n");
         http_server_send(request->socket, response, strlen(response));
 
         request->dir_context.actor = tracedir;
         iterate_dir(fp, &request->dir_context);
 
         snprintf(response, SEND_BUFFER_SIZE, "%s",
-                 "</table></body></html>\r\n");
+                 "16\r\n</table></body></html>\r\n");
+        http_server_send(request->socket, response, strlen(response));
+
+        snprintf(response, SEND_BUFFER_SIZE, "%s", "0\r\n\r\n");
         http_server_send(request->socket, response, strlen(response));
     } else if (S_ISREG(fp->f_inode->i_mode)) {
         char *html_data = kmalloc(fp->f_inode->i_size, GFP_KERNEL);
@@ -174,7 +184,7 @@ static int http_server_response(struct http_request *request, int keep_alive)
 {
     pr_info("requested_url = %s\n", request->request_url);
     send_directory(request, keep_alive);
-    kernel_sock_shutdown(request->socket, SHUT_RDWR);
+    // kernel_sock_shutdown(request->socket, SHUT_RDWR);
 
     return 0;
 }
@@ -193,6 +203,8 @@ static int http_parser_callback_request_url(http_parser *parser,
                                             size_t len)
 {
     struct http_request *request = parser->data;
+    if (p[len - 1] == '/')
+        len--;
     strncat(request->request_url, p, len);
     return 0;
 }
@@ -278,7 +290,7 @@ static void http_server_worker(struct work_struct *w)
             break;
         memset(buf, 0, RECV_BUFFER_SIZE);
     }
-    // kernel_sock_shutdown(socket, SHUT_RDWR);
+    kernel_sock_shutdown(socket, SHUT_RDWR);
     sock_release(socket);
     kfree(buf);
     return;
