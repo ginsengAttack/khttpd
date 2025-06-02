@@ -6,31 +6,11 @@
 
 #include "http_parser.h"
 #include "http_server.h"
+#include "mime.h"
 
 #define CRLF "\r\n"
 
 #define PATH "/home/ginseng/ktcp/root"
-
-#define HTTP_RESPONSE_200_DUMMY                               \
-    ""                                                        \
-    "HTTP/1.1 200 OK" CRLF "Server: " KBUILD_MODNAME CRLF     \
-    "Content-Type: text/plain" CRLF "Content-Length: 12" CRLF \
-    "Connection: Close" CRLF CRLF "NMSL!!!!!!!!" CRLF
-#define HTTP_RESPONSE_200_KEEPALIVE_DUMMY                     \
-    ""                                                        \
-    "HTTP/1.1 200 OK" CRLF "Server: " KBUILD_MODNAME CRLF     \
-    "Content-Type: text/plain" CRLF "Content-Length: 12" CRLF \
-    "Connection: Keep-Alive" CRLF CRLF "NMSL?!!!!!!!" CRLF
-#define HTTP_RESPONSE_501                                              \
-    ""                                                                 \
-    "HTTP/1.1 501 Not Implemented" CRLF "Server: " KBUILD_MODNAME CRLF \
-    "Content-Type: text/plain" CRLF "Content-Length: 21" CRLF          \
-    "Connection: Close" CRLF CRLF "501 Not Implemented" CRLF
-#define HTTP_RESPONSE_501_KEEPALIVE                                    \
-    ""                                                                 \
-    "HTTP/1.1 501 Not Implemented" CRLF "Server: " KBUILD_MODNAME CRLF \
-    "Content-Type: text/plain" CRLF "Content-Length: 21" CRLF          \
-    "Connection: KeepAlive" CRLF CRLF "501 Not Implemented" CRLF
 
 #define RECV_BUFFER_SIZE 4096
 #define SEND_BUFFER_SIZE 4096
@@ -75,6 +55,18 @@ static ssize_t ktcp_state_store(struct device *dev,
 }
 
 static DEVICE_ATTR_RW(ktcp_state);
+
+const char *search_mime_type(char *request)
+{
+    char *type = strrchr(request, '.');
+
+    for (int i = 0; mime_type[i].type; i++) {
+        if (strcmp(mime_type[i].type, type) == 0)
+            return mime_type[i].label;
+    }
+
+    return "text/plain";
+}
 
 static int http_server_recv(struct socket *sock, char *buf, size_t size)
 {
@@ -189,13 +181,14 @@ static bool send_directory(struct http_request *request, int keep_alive)
     } else if (S_ISREG(fp->f_inode->i_mode)) {
         char *html_data = kmalloc(fp->f_inode->i_size, GFP_KERNEL);
         int html_length = kernel_read(fp, html_data, fp->f_inode->i_size, 0);
+        char *type = search_mime_type(request->request_url);
 
         snprintf(response, SEND_BUFFER_SIZE,
                  ""
                  "HTTP/1.1 200 OK" CRLF "Server: " KBUILD_MODNAME CRLF
-                 "Content-Type: text/html" CRLF "Content-Length:%d" CRLF
+                 "Content-Type: %s" CRLF "Content-Length:%d" CRLF
                  "Connection: Keep-Alive" CRLF CRLF,
-                 html_length);
+                 type, html_length);
         http_server_send(request->socket, response, strlen(response));
 
         http_server_send(request->socket, html_data, html_length);
@@ -308,6 +301,7 @@ static void http_server_worker(struct work_struct *w)
     request.socket = socket;
     http_parser_init(&parser, HTTP_REQUEST);
     parser.data = &request;
+
     while (!kthread_should_stop() && enable == '1') {
         int ret = http_server_recv(socket, buf, RECV_BUFFER_SIZE - 1);
         if (ret <= 0) {
