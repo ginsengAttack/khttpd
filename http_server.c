@@ -48,6 +48,34 @@ static struct link_data {
     struct work_struct worker;
 };
 
+struct ktcp_attr {
+    char enable;
+    rwlock_t lock;
+};
+
+static struct ktcp_attr attr_obj;
+static ssize_t ktcp_state_show(struct device *dev,
+                               struct device_attribute *attr,
+                               char *buf)
+{
+    read_lock(&attr_obj.lock);
+    int ret = snprintf(buf, "%c\n", attr_obj.enable);
+    read_unlock(&attr_obj.lock);
+    return ret;
+}
+static ssize_t ktcp_state_store(struct device *dev,
+                                struct device_attribute *attr,
+                                const char *buf,
+                                size_t count)
+{
+    write_lock(&attr_obj.lock);
+    sscanf(buf, "%c", &(attr_obj.enable));
+    write_unlock(&attr_obj.lock);
+    return count;
+}
+
+static DEVICE_ATTR_RW(ktcp_state);
+
 static int http_server_recv(struct socket *sock, char *buf, size_t size)
 {
     struct kvec iov = {.iov_base = (void *) buf, .iov_len = size};
@@ -109,8 +137,6 @@ static _Bool tracedir(struct dir_context *dir_context,
         struct http_request *request =
             container_of(dir_context, struct http_request, dir_context);
         char buf[SEND_BUFFER_SIZE] = {0};
-
-
 
         snprintf(buf, SEND_BUFFER_SIZE,
                  "%lx\r\n<tr><td><a href=\"%s/%s\">%s</a></td></tr>\r\n",
@@ -275,10 +301,14 @@ static void http_server_worker(struct work_struct *w)
         return;
     }
 
+    read_lock(&attr_obj.lock);
+    char enable = attr_obj.enable;
+    read_unlock(&attr_obj.lock);
+
     request.socket = socket;
     http_parser_init(&parser, HTTP_REQUEST);
     parser.data = &request;
-    while (!kthread_should_stop()) {
+    while (!kthread_should_stop() && enable == '1') {
         int ret = http_server_recv(socket, buf, RECV_BUFFER_SIZE - 1);
         if (ret <= 0) {
             if (ret)
@@ -296,6 +326,27 @@ static void http_server_worker(struct work_struct *w)
     return;
 }
 
+static struct class *ktcp_class;
+static struct device *ktcp_dev;
+
+static int init_sys(void)
+{
+    ktcp_class = class_create("ktcp");
+    if (IS_ERR(ktcp_class))
+        return PTR_ERR(ktcp_class);
+    ktcp_dev = device_create(ktcp_class, NULL, 0, NULL, "ktcp");
+    if (IS_ERR(ktcp_dev)) {
+        class_destroy(ktcp_class);
+        return PTR_ERR(ktcp_dev);
+    }
+    device_create_file(ktcp_dev, &dev_attr_ktcp_state);
+
+    attr_obj.enable = '1';
+    rwlock_init(&attr_obj.lock);
+
+    return 0;
+}
+
 int http_server_daemon(void *arg)
 {
     struct socket *socket;
@@ -306,6 +357,9 @@ int http_server_daemon(void *arg)
     allow_signal(SIGTERM);
 
     cmwq_workqueue = alloc_workqueue("Ktcp", 0, 0);
+    if (init_sys() != 0)
+        pr_info("init_sys error");
+
 
     while (!kthread_should_stop()) {
         int err = kernel_accept(param->listen_socket, &socket, 0);
@@ -328,6 +382,8 @@ int http_server_daemon(void *arg)
 
     flush_workqueue(cmwq_workqueue);
     destroy_workqueue(cmwq_workqueue);
+    device_destroy(ktcp_class, 0);
+    class_destroy(ktcp_class);
 
     return 0;
 }
