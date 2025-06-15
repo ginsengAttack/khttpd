@@ -1,0 +1,11 @@
+{
+    "files.associations": {
+        "data_compress.h": "c",
+        "http_server.h": "c",
+        "types.h": "c",
+        "ctype.h": "c",
+        "limits.h": "c",
+        "assert.h": "c",
+        "picohttpparser.h": "c"
+    }
+}

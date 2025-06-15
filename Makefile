@@ -3,11 +3,14 @@ KDIR=/lib/modules/$(shell uname -r)/build
 CFLAGS_user = -std=gnu11 -Wall -Wextra -Werror
 LDFLAGS_user = -lpthread
 
+EXTRA_CFLAGS += -pg
 obj-m += khttpd.o
 khttpd-objs := \
 	http_parser.o \
 	http_server.o \
-	main.o
+	main.o \
+	data_compress.o\
+	picohttpparser.o
 
 GIT_HOOKS := .git/hooks/applied
 all: $(GIT_HOOKS) http_parser.c htstress

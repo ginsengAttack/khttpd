@@ -6,8 +6,7 @@ CPPCHECK_suppresses="--suppress=missingIncludeSystem \
                      --suppress=duplicateBreak:http_parser.c \
                      --suppress=shadowVariable:http_parser.c \
 		     --suppress=unknownMacro:http_server.c \
-                     --suppress=unusedStructMember:http_parser.h \
-                     --suppress=unusedStructMember:http_server.h"
+                     --suppress=unusedStructMember:http_parser.h"
 CPPCHECK_OPTS="-I. --enable=all --error-exitcode=1 --force $CPPCHECK_suppresses"
 
 RETURN=0

@@ -1,13 +1,14 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
-#include <linux/crypto.h>
 #include <linux/kthread.h>
 #include <linux/sched/signal.h>
 #include <linux/tcp.h>
 
+#include "data_compress.h"
 #include "http_parser.h"
 #include "http_server.h"
 #include "mime.h"
+#include "picohttpparser.h"
 
 #define CRLF "\r\n"
 
@@ -56,28 +57,6 @@ static ssize_t ktcp_state_store(struct device *dev,
 }
 
 static DEVICE_ATTR_RW(ktcp_state);
-
-bool data_compress(const char *file,
-                   unsigned int file_len,
-                   char *comp_file,
-                   unsigned int *comp_len)
-{
-    struct crypto_comp *comp;
-    comp = crypto_alloc_comp("deflate", 0, 0);
-    if (IS_ERR(comp)) {
-        return false;
-    }
-
-    int ret = crypto_comp_compress(comp, file, file_len, comp_file, comp_len);
-
-    if (ret) {
-        crypto_free_comp(comp);
-        return false;
-    }
-
-    crypto_free_comp(comp);
-    return true;
-}
 
 const char *search_mime_type(char *request)
 {
@@ -151,9 +130,9 @@ static _Bool tracedir(struct dir_context *dir_context,
     if (strcmp(name, ".") && strcmp(name, "..")) {
         struct http_request *request =
             container_of(dir_context, struct http_request, dir_context);
-        char buf[SEND_BUFFER_SIZE] = {0};
+        char buf[200] = {0};
 
-        snprintf(buf, SEND_BUFFER_SIZE,
+        snprintf(buf, 200,
                  "%lx\r\n<tr><td><a href=\"%s/%s\">%s</a></td></tr>\r\n",
                  34 + namelen + namelen + strlen(request->request_url),
                  request->request_url, name, name);
@@ -216,8 +195,6 @@ static bool send_directory(struct http_request *request, int keep_alive)
             kfree(comp_data);
             return false;
         }
-        pr_info("original size:%d", html_length);
-        pr_info("compress size:%d", comp_len);
 
         snprintf(response, SEND_BUFFER_SIZE,
                  ""
@@ -239,66 +216,55 @@ static bool send_directory(struct http_request *request, int keep_alive)
 static int http_server_response(struct http_request *request, int keep_alive)
 {
     pr_info("requested_url = %s\n", request->request_url);
+    pr_info("method = %d\ncomplete = %d\n", request->method, request->complete);
     send_directory(request, keep_alive);
     // kernel_sock_shutdown(request->socket, SHUT_RDWR);
 
     return 0;
 }
 
-static int http_parser_callback_message_begin(http_parser *parser)
+enum http_method map_method(size_t method_len)
 {
-    struct http_request *request = parser->data;
+    if (method_len == 4)
+        return HTTP_POST;
+    else
+        return HTTP_GET;
+}
+
+/*this function to handle http request*/
+static int phr_parse(struct http_request *request, char *buf, ssize_t size)
+{
+    const char *method, *path;
+    int pret, minor_version;
+    struct phr_header headers[100];
+    size_t buflen = size, prevbuflen = 0, method_len, path_len,
+           num_headers = 100;
+
+    pret =
+        phr_parse_request(buf, buflen, &method, &method_len, &path, &path_len,
+                          &minor_version, headers, &num_headers, prevbuflen);
+    if (pret == -1)
+        return 0;
+
     struct socket *socket = request->socket;
     memset(request, 0x00, sizeof(struct http_request));
     request->socket = socket;
-    return 0;
-}
 
-static int http_parser_callback_request_url(http_parser *parser,
-                                            const char *p,
-                                            size_t len)
-{
-    struct http_request *request = parser->data;
-    if (p[len - 1] == '/')
-        len--;
-    strncat(request->request_url, p, len);
-    return 0;
-}
+    request->request_url[0] = '\0';
 
-static int http_parser_callback_header_field(http_parser *parser,
-                                             const char *p,
-                                             size_t len)
-{
-    return 0;
-}
 
-static int http_parser_callback_header_value(http_parser *parser,
-                                             const char *p,
-                                             size_t len)
-{
-    return 0;
-}
+    if (path_len > 128)
+        return 0;
+    else if (path_len == 1 && path[path_len - 1] == '/')
+        path_len = 0;
+    strncat(request->request_url, path, path_len);
 
-static int http_parser_callback_headers_complete(http_parser *parser)
-{
-    struct http_request *request = parser->data;
-    request->method = parser->method;
-    return 0;
-}
+    request->method = map_method(method_len);
 
-static int http_parser_callback_body(http_parser *parser,
-                                     const char *p,
-                                     size_t len)
-{
-    return 0;
-}
-
-static int http_parser_callback_message_complete(http_parser *parser)
-{
-    struct http_request *request = parser->data;
-    http_server_response(request, http_should_keep_alive(parser));
+    http_server_response(request, 1);  // http_should_keep_alive(parser));
     request->complete = 1;
-    return 0;
+
+    return 1;
 }
 
 struct workqueue_struct *cmwq_workqueue;
@@ -308,16 +274,16 @@ static void http_server_worker(struct work_struct *w)
     struct link_data *data_for_link = container_of(w, struct link_data, worker);
 
     char *buf;
-    struct http_parser parser;
-    struct http_parser_settings setting = {
-        .on_message_begin = http_parser_callback_message_begin,
-        .on_url = http_parser_callback_request_url,
-        .on_header_field = http_parser_callback_header_field,
-        .on_header_value = http_parser_callback_header_value,
-        .on_headers_complete = http_parser_callback_headers_complete,
-        .on_body = http_parser_callback_body,
-        .on_message_complete = http_parser_callback_message_complete,
-    };
+    // struct http_parser parser;
+    // struct http_parser_settings setting = {
+    //     .on_message_begin = http_parser_callback_message_begin,
+    //     .on_url = http_parser_callback_request_url,
+    //     .on_header_field = http_parser_callback_header_field,
+    //     .on_header_value = http_parser_callback_header_value,
+    //     .on_headers_complete = http_parser_callback_headers_complete,
+    //     .on_body = http_parser_callback_body,
+    //     .on_message_complete = http_parser_callback_message_complete,
+    // };
     struct http_request request;
     // struct socket *socket = (struct socket *) arg;
     struct socket *socket = data_for_link->socket;
@@ -335,14 +301,15 @@ static void http_server_worker(struct work_struct *w)
     char enable = attr_obj.enable;
     read_unlock(&attr_obj.lock);
 
+
     request.socket = socket;
-    http_parser_init(&parser, HTTP_REQUEST);
-    parser.data = &request;
+    // http_parser_init(&parser, HTTP_REQUEST);
+    // parser.data = &request;
 
     unsigned long expire_time = jiffies;  // to record the linking time
 
     while (!kthread_should_stop() && enable == '1') {
-        int ret = http_server_recv(socket, buf, RECV_BUFFER_SIZE - 1);
+        ssize_t ret = http_server_recv(socket, buf, RECV_BUFFER_SIZE - 1);
         if (ret <= 0) {
             if (ret == -EAGAIN) {
                 if (time_after(jiffies, expire_time + msecs_to_jiffies(5000))) {
@@ -359,8 +326,9 @@ static void http_server_worker(struct work_struct *w)
 
         expire_time = jiffies;  // update expire time
 
-        http_parser_execute(&parser, &setting, buf, ret);
-        if (request.complete && !http_should_keep_alive(&parser))
+        // http_parser_execute(&parser, &setting, buf, ret);
+        phr_parse(&request, buf, ret);
+        if (request.complete)  // && !http_should_keep_alive(&parser))
             break;
         memset(buf, 0, RECV_BUFFER_SIZE);
     }
