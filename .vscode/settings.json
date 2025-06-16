@@ -6,6 +6,8 @@
         "ctype.h": "c",
         "limits.h": "c",
         "assert.h": "c",
-        "picohttpparser.h": "c"
+        "picohttpparser.h": "c",
+        "typeinfo": "c",
+        "type_traits": "c"
     }
 }

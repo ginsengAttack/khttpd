@@ -6,7 +6,6 @@ LDFLAGS_user = -lpthread
 EXTRA_CFLAGS += -pg
 obj-m += khttpd.o
 khttpd-objs := \
-	http_parser.o \
 	http_server.o \
 	main.o \
 	data_compress.o\
