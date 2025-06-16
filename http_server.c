@@ -187,8 +187,8 @@ static bool send_directory(struct http_request *request, int keep_alive)
         /*compress data*/
         char *comp_data = kmalloc(fp->f_inode->i_size, GFP_KERNEL);
         unsigned int comp_len = fp->f_inode->i_size;
-        bool ret = data_compress(html_data, html_length, comp_data, &comp_len);
-        if (!ret) {
+        bool rret = data_compress(html_data, html_length, comp_data, &comp_len);
+        if (!rret) {
             kfree(html_data);
             filp_close(fp, NULL);
             kfree(comp_data);
