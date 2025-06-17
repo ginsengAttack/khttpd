@@ -16,16 +16,19 @@
 #define RECV_BUFFER_SIZE 4096
 #define SEND_BUFFER_SIZE 4096
 
+struct httpd_service {
+    bool isStop;
+    struct list_head head;
+};
+struct httpd_service httpd_workqueue;
+
 struct http_request {
     struct socket *socket;
     enum http_method method;
     char request_url[128];
     int complete;
     struct dir_context dir_context;
-};
-
-static struct link_data {
-    struct socket *socket;
+    struct list_head node;  // link all workitem
     struct work_struct worker;
 };
 
@@ -136,7 +139,7 @@ static _Bool tracedir(struct dir_context *dir_context,
                  34 + namelen + namelen + strlen(request->request_url),
                  request->request_url, name, name);
 
-        pr_info("send url:%s", buf);
+        // pr_info("send url:%s", buf);
         http_server_send(request->socket, buf, strlen(buf));
     }
     return true;
@@ -187,8 +190,8 @@ static bool send_directory(struct http_request *request, int keep_alive)
         /*compress data*/
         char *comp_data = kmalloc(fp->f_inode->i_size, GFP_KERNEL);
         unsigned int comp_len = fp->f_inode->i_size;
-        bool rret = data_compress(html_data, html_length, comp_data, &comp_len);
-        if (!rret) {
+        bool ret = data_compress(html_data, html_length, comp_data, &comp_len);
+        if (!ret) {
             kfree(html_data);
             filp_close(fp, NULL);
             kfree(comp_data);
@@ -214,8 +217,9 @@ static bool send_directory(struct http_request *request, int keep_alive)
 
 static int http_server_response(struct http_request *request, int keep_alive)
 {
-    pr_info("requested_url = %s\n", request->request_url);
-    pr_info("method = %d\ncomplete = %d\n", request->method, request->complete);
+    // pr_info("requested_url = %s\n", request->request_url);
+    // pr_info("method = %d\ncomplete = %d\n", request->method,
+    // request->complete);
     send_directory(request, keep_alive);
     // kernel_sock_shutdown(request->socket, SHUT_RDWR);
 
@@ -300,7 +304,9 @@ struct workqueue_struct *cmwq_workqueue;
 
 static void http_server_worker(struct work_struct *w)
 {
-    struct link_data *data_for_link = container_of(w, struct link_data, worker);
+    // struct link_data *data_for_link = container_of(w, struct link_data,
+    // worker);
+    struct http_request *request = container_of(w, struct http_request, worker);
 
     char *buf;
     // struct http_parser parser;
@@ -313,9 +319,10 @@ static void http_server_worker(struct work_struct *w)
     //     .on_body = http_parser_callback_body,
     //     .on_message_complete = http_parser_callback_message_complete,
     // };
-    struct http_request request;
+    // struct http_request request;
+
     // struct socket *socket = (struct socket *) arg;
-    struct socket *socket = data_for_link->socket;
+    struct socket *socket = request->socket;
 
     allow_signal(SIGKILL);
     allow_signal(SIGTERM);
@@ -331,7 +338,7 @@ static void http_server_worker(struct work_struct *w)
     read_unlock(&attr_obj.lock);
 
 
-    request.socket = socket;
+    // request.socket = socket;
 
     while (!kthread_should_stop() && enable == '1') {
         ssize_t ret = http_server_recv(socket, buf, RECV_BUFFER_SIZE - 1);
@@ -342,8 +349,8 @@ static void http_server_worker(struct work_struct *w)
             break;
         }
         int keep_alive = 0;
-        phr_parse(&request, buf, ret, &keep_alive);
-        if (request.complete &&
+        phr_parse(request, buf, ret, &keep_alive);
+        if (request->complete &&
             !keep_alive)  // && !http_should_keep_alive(&parser))
             break;
         memset(buf, 0, RECV_BUFFER_SIZE);
@@ -375,6 +382,22 @@ static int init_sys(void)
     return 0;
 }
 
+static void free_work(void)
+{
+    struct http_request *tar, *tmp;
+
+    list_for_each_entry_safe (tar, tmp, &httpd_workqueue.head, node) {
+        flush_work(&tar->worker);
+        if (tar->socket) {
+            if (!IS_ERR(tar->socket)) {
+                kernel_sock_shutdown(tar->socket, SHUT_RDWR);
+                sock_release(tar->socket);
+            }
+        }
+        kfree(tar);
+    }
+}
+
 int http_server_daemon(void *arg)
 {
     struct socket *socket;
@@ -384,6 +407,8 @@ int http_server_daemon(void *arg)
     allow_signal(SIGKILL);
     allow_signal(SIGTERM);
 
+    httpd_workqueue.isStop = false;
+    INIT_LIST_HEAD(&httpd_workqueue.head);
     cmwq_workqueue = alloc_workqueue("Ktcp", 0, 0);
     if (init_sys() != 0)
         pr_info("init_sys error");
@@ -398,17 +423,20 @@ int http_server_daemon(void *arg)
             continue;
         }
 
-        struct link_data *worker;
+        struct http_request *worker;
 
-        if (!(worker = kmalloc(sizeof(struct link_data), GFP_KERNEL)))
+        if (!(worker = kmalloc(sizeof(struct http_request), GFP_KERNEL)))
             return NULL;
 
         worker->socket = socket;
         INIT_WORK(&worker->worker, http_server_worker);
+        list_add(&worker->node, &httpd_workqueue.head);
         queue_work(cmwq_workqueue, &worker->worker);
     }
 
+    httpd_workqueue.isStop = true;
     flush_workqueue(cmwq_workqueue);
+    // free_work();
     destroy_workqueue(cmwq_workqueue);
     device_destroy(ktcp_class, 0);
     class_destroy(ktcp_class);

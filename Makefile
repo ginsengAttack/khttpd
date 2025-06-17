@@ -12,7 +12,7 @@ khttpd-objs := \
 	picohttpparser.o
 
 GIT_HOOKS := .git/hooks/applied
-all: $(GIT_HOOKS) http_parser.c htstress
+all: $(GIT_HOOKS) htstress
 	make -C $(KDIR) M=$(PWD) modules
 
 $(GIT_HOOKS):
